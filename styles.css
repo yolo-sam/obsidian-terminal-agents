@@ -1,17 +1,19 @@
 /* Terminal for Agents — pane styles
  *
- * The wrapper fills the Obsidian pane; the canvas inside is sized by
- * ghostty-web's FitAddon to grid * cell-size (its natural pixel dimensions).
- * Don't force CSS dimensions on the canvas — that stretches the bitmap
- * non-proportionally and the text squashes/blurs.
+ * Matches the ghostty-web reference demo: simple block container with
+ * `position: relative` (anchors the canvas), `display: block` on the canvas
+ * (no width/height overrides — bitmap is sized by FitAddon to grid * cell,
+ * and CSS displays at canvas-pixels ÷ DPR).
+ *
+ * Do NOT add `display: flex` or canvas size overrides here. Both break the
+ * canvas's natural pixel-perfect sizing and the text starts to look squashed
+ * or scaled.
  */
 
 .terminal-agents-container,
 .workspace-leaf-content[data-type="terminal-agents"] .view-content {
 	width: 100%;
 	height: 100%;
-	display: flex;
-	flex-direction: column;
 	overflow: hidden;
 	padding: 0 !important;
 	margin: 0 !important;
@@ -19,12 +21,14 @@
 }
 
 .terminal-agents-term {
-	flex: 1 1 100%;
+	position: relative;
 	width: 100%;
 	height: 100%;
-	overflow: hidden;
-	padding: 4px 8px;
+	padding: 8px 12px;
 	box-sizing: border-box;
-	display: flex;
-	align-items: flex-start;
+	overflow: hidden;
+}
+
+.terminal-agents-term canvas {
+	display: block;
 }

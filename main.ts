@@ -130,10 +130,16 @@ class TerminalView extends ItemView {
 	// ── Terminal init ────────────────────────────────────────────────────────
 
 	private initTerminal(): void {
-		const fontFamily = "var(--font-monospace), Menlo, Monaco, monospace";
+		// IMPORTANT: ghostty-web renders via Canvas 2D — CSS variables (like
+		// `var(--font-monospace)`) are NOT resolved by canvas font parsing. Passing
+		// one results in a fallback to default-metrics serif/sans-serif that draws
+		// glyphs much narrower than the computed cell width, so every character
+		// looks isolated in a too-wide cell. Use a real font stack here.
+		const fontFamily = 'Menlo, Monaco, "SF Mono", "Cascadia Mono", "Courier New", monospace';
 		const fontSize = this.plugin.settings.fontSize;
-		// Theme keyed to Obsidian's CSS variables so the terminal matches the
-		// active Obsidian theme without parsing the user's Ghostty config.
+
+		// For colors, getPropertyValue on a real element DOES return the resolved
+		// CSS variable value, so theming against the active Obsidian theme is fine.
 		const cssVar = (name: string, fallback: string) =>
 			getComputedStyle(this.containerEl).getPropertyValue(name).trim() || fallback;
 		const theme = {

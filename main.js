@@ -2538,7 +2538,7 @@ class TerminalView extends import_obsidian2.ItemView {
     this.terminal = null;
   }
   initTerminal() {
-    const fontFamily = "var(--font-monospace), Menlo, Monaco, monospace";
+    const fontFamily = 'Menlo, Monaco, "SF Mono", "Cascadia Mono", "Courier New", monospace';
     const fontSize = this.plugin.settings.fontSize;
     const cssVar = (name, fallback) => getComputedStyle(this.containerEl).getPropertyValue(name).trim() || fallback;
     const theme = {
