@@ -2218,6 +2218,67 @@ class IA {
     return this.assertOpen(), this.wasmTerm.hasMouseTracking();
   }
 }
+var QA = 2;
+var BA = 1;
+var gA = 15;
+var EA = 100;
+
+class DA {
+  constructor() {
+    this._isResizing = false;
+  }
+  activate(A) {
+    this._terminal = A;
+  }
+  dispose() {
+    this._resizeObserver && (this._resizeObserver.disconnect(), this._resizeObserver = undefined), this._resizeDebounceTimer && (clearTimeout(this._resizeDebounceTimer), this._resizeDebounceTimer = undefined), this._lastCols = undefined, this._lastRows = undefined, this._terminal = undefined;
+  }
+  fit() {
+    if (this._isResizing)
+      return;
+    const A = this.proposeDimensions();
+    if (!A || !this._terminal)
+      return;
+    const B = this._terminal, g = B.cols, E = B.rows;
+    if (!(A.cols === this._lastCols && A.rows === this._lastRows || A.cols === g && A.rows === E)) {
+      this._lastCols = A.cols, this._lastRows = A.rows, this._isResizing = true;
+      try {
+        B.resize && typeof B.resize == "function" && B.resize(A.cols, A.rows);
+      } finally {
+        setTimeout(() => {
+          this._isResizing = false;
+        }, 50);
+      }
+    }
+  }
+  proposeDimensions() {
+    var G;
+    if (!((G = this._terminal) != null && G.element))
+      return;
+    const B = this._terminal.renderer;
+    if (!B || typeof B.getMetrics != "function")
+      return;
+    const g = B.getMetrics();
+    if (!g || g.width === 0 || g.height === 0)
+      return;
+    const E = this._terminal.element;
+    if (typeof E.clientWidth > "u")
+      return;
+    const C = window.getComputedStyle(E), I = Number.parseInt(C.getPropertyValue("padding-top")) || 0, D = Number.parseInt(C.getPropertyValue("padding-bottom")) || 0, i = Number.parseInt(C.getPropertyValue("padding-left")) || 0, w = Number.parseInt(C.getPropertyValue("padding-right")) || 0, s = E.clientWidth, N = E.clientHeight;
+    if (s === 0 || N === 0)
+      return;
+    const k = s - i - w - gA, M = N - I - D, a = Math.max(QA, Math.floor(k / g.width)), h = Math.max(BA, Math.floor(M / g.height));
+    return { cols: a, rows: h };
+  }
+  observeResize() {
+    var A;
+    (A = this._terminal) != null && A.element && (this._resizeObserver || (this._resizeObserver = new ResizeObserver((B) => {
+      this._isResizing || !B[0] || (this._resizeDebounceTimer && clearTimeout(this._resizeDebounceTimer), this._resizeDebounceTimer = setTimeout(() => {
+        this.fit();
+      }, EA));
+    }), this._resizeObserver.observe(this._terminal.element)));
+  }
+}
 var R = null;
 async function oA() {
   R || (R = await q.load());
@@ -2435,13 +2496,11 @@ class TerminalAgentsPlugin extends import_obsidian2.Plugin {
 class TerminalView extends import_obsidian2.ItemView {
   plugin;
   terminal = null;
+  fitAddon = null;
   helper = null;
   resizePipe = null;
   contextBridge = null;
-  resizeObserver = null;
   termEl = null;
-  charWidth = 9;
-  charHeight = 18;
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -2466,18 +2525,15 @@ class TerminalView extends import_obsidian2.ItemView {
       this.fail("Ghostty WASM failed to load", e3);
       return;
     }
-    this.measureChar();
     this.initTerminal();
     this.spawnHelper();
-    this.resizeObserver = new ResizeObserver(() => this.handleResize());
-    this.resizeObserver.observe(this.termEl);
   }
   async onClose() {
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
     this.killHelper();
     this.contextBridge?.stop();
     this.contextBridge = null;
+    this.fitAddon?.dispose?.();
+    this.fitAddon = null;
     this.terminal?.dispose?.();
     this.terminal = null;
   }
@@ -2491,30 +2547,15 @@ class TerminalView extends import_obsidian2.ItemView {
       cursor: cssVar("--text-accent", "#f5e0dc")
     };
     this.terminal = new IA({ fontFamily, fontSize, theme });
+    this.fitAddon = new DA;
+    this.terminal.loadAddon(this.fitAddon);
     this.terminal.open(this.termEl);
     this.terminal.onData((data) => {
       this.helper?.stdin?.write(data, "utf8");
     });
-  }
-  measureChar() {
-    const probe = this.containerEl.ownerDocument.createElement("canvas");
-    const ctx = probe.getContext("2d");
-    if (!ctx)
-      return;
-    const fontSize = this.plugin.settings.fontSize;
-    ctx.font = `${fontSize}px var(--font-monospace), Menlo, Monaco, monospace`;
-    const m2 = ctx.measureText("W");
-    this.charWidth = Math.max(1, Math.ceil(m2.width));
-    const ascent = m2.actualBoundingBoxAscent ?? fontSize * 0.8;
-    const descent = m2.actualBoundingBoxDescent ?? fontSize * 0.2;
-    this.charHeight = Math.max(1, Math.ceil((ascent + descent) * 1.2));
-  }
-  gridSize() {
-    const rect = this.termEl.getBoundingClientRect();
-    return {
-      cols: Math.max(10, Math.floor(rect.width / this.charWidth)),
-      rows: Math.max(5, Math.floor(rect.height / this.charHeight))
-    };
+    this.terminal.onResize(({ cols, rows }) => this.sendResize(rows, cols));
+    this.fitAddon.fit();
+    this.fitAddon.observeResize();
   }
   spawnHelper() {
     const cwd = this.resolveCwd();
@@ -2535,7 +2576,6 @@ class TerminalView extends import_obsidian2.ItemView {
       ...extraEnv,
       PATH: [path2.dirname(bunPath), env.PATH].filter(Boolean).join(path2.delimiter)
     };
-    const { cols, rows } = this.gridSize();
     try {
       this.helper = import_node_child_process.spawn(bunPath, [helperPath, ...argv], {
         cwd,
@@ -2564,7 +2604,8 @@ class TerminalView extends import_obsidian2.ItemView {
       this.resizePipe = null;
     });
     this.helper.on("error", (err) => this.fail("Helper error", err));
-    this.sendResize(rows, cols);
+    if (this.terminal)
+      this.sendResize(this.terminal.rows, this.terminal.cols);
     if (this.plugin.settings.shareObsidianContext) {
       this.contextBridge = new ContextBridge(this.app, env.OBSIDIAN_CONTEXT_FILE);
       this.contextBridge.start();
@@ -2582,11 +2623,6 @@ class TerminalView extends import_obsidian2.ItemView {
     } catch {}
     this.helper = null;
     this.resizePipe = null;
-  }
-  handleResize() {
-    const { cols, rows } = this.gridSize();
-    this.terminal?.resize(cols, rows);
-    this.sendResize(rows, cols);
   }
   sendResize(rows, cols) {
     if (!this.resizePipe)

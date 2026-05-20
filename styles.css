@@ -1,4 +1,10 @@
-/* Terminal for Agents — pane styles */
+/* Terminal for Agents — pane styles
+ *
+ * The wrapper fills the Obsidian pane; the canvas inside is sized by
+ * ghostty-web's FitAddon to grid * cell-size (its natural pixel dimensions).
+ * Don't force CSS dimensions on the canvas — that stretches the bitmap
+ * non-proportionally and the text squashes/blurs.
+ */
 
 .terminal-agents-container,
 .workspace-leaf-content[data-type="terminal-agents"] .view-content {
@@ -18,9 +24,7 @@
 	height: 100%;
 	overflow: hidden;
 	padding: 4px 8px;
-}
-
-.terminal-agents-term canvas {
-	width: 100% !important;
-	height: 100% !important;
+	box-sizing: border-box;
+	display: flex;
+	align-items: flex-start;
 }

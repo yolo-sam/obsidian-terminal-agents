@@ -7,7 +7,7 @@
 //
 
 import { ItemView, type Menu, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
-import { init as initGhosttyWasm, Terminal } from "ghostty-web";
+import { init as initGhosttyWasm, FitAddon, Terminal } from "ghostty-web";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -80,13 +80,11 @@ export default class TerminalAgentsPlugin extends Plugin {
 
 class TerminalView extends ItemView {
 	private terminal: Terminal | null = null;
+	private fitAddon: FitAddon | null = null;
 	private helper: ChildProcess | null = null;
 	private resizePipe: NodeJS.WritableStream | null = null;
 	private contextBridge: ContextBridge | null = null;
-	private resizeObserver: ResizeObserver | null = null;
 	private termEl: HTMLElement | null = null;
-	private charWidth = 9;
-	private charHeight = 18;
 
 	constructor(leaf: WorkspaceLeaf, private plugin: TerminalAgentsPlugin) {
 		super(leaf);
@@ -115,20 +113,16 @@ class TerminalView extends ItemView {
 			return;
 		}
 
-		this.measureChar();
 		this.initTerminal();
 		this.spawnHelper();
-
-		this.resizeObserver = new ResizeObserver(() => this.handleResize());
-		this.resizeObserver.observe(this.termEl);
 	}
 
 	async onClose(): Promise<void> {
-		this.resizeObserver?.disconnect();
-		this.resizeObserver = null;
 		this.killHelper();
 		this.contextBridge?.stop();
 		this.contextBridge = null;
+		this.fitAddon?.dispose?.();
+		this.fitAddon = null;
 		this.terminal?.dispose?.();
 		this.terminal = null;
 	}
@@ -149,32 +143,26 @@ class TerminalView extends ItemView {
 		};
 
 		this.terminal = new Terminal({ fontFamily, fontSize, theme });
+		this.fitAddon = new FitAddon();
+		this.terminal.loadAddon(this.fitAddon);
 		this.terminal.open(this.termEl!);
+
 		// Keystrokes → helper stdin → shell.
 		this.terminal.onData((data: string) => {
 			this.helper?.stdin?.write(data, "utf8");
 		});
-	}
 
-	private measureChar(): void {
-		const probe = this.containerEl.ownerDocument.createElement("canvas");
-		const ctx = probe.getContext("2d");
-		if (!ctx) return;
-		const fontSize = this.plugin.settings.fontSize;
-		ctx.font = `${fontSize}px var(--font-monospace), Menlo, Monaco, monospace`;
-		const m = ctx.measureText("W");
-		this.charWidth = Math.max(1, Math.ceil(m.width));
-		const ascent = m.actualBoundingBoxAscent ?? fontSize * 0.8;
-		const descent = m.actualBoundingBoxDescent ?? fontSize * 0.2;
-		this.charHeight = Math.max(1, Math.ceil((ascent + descent) * 1.2));
-	}
+		// When the terminal grid changes (FitAddon resizes it on container change,
+		// or font/dpr change), propagate the new size to the PTY so the shell wraps
+		// correctly.
+		this.terminal.onResize(({ cols, rows }) => this.sendResize(rows, cols));
 
-	private gridSize(): { cols: number; rows: number } {
-		const rect = this.termEl!.getBoundingClientRect();
-		return {
-			cols: Math.max(10, Math.floor(rect.width / this.charWidth)),
-			rows: Math.max(5, Math.floor(rect.height / this.charHeight)),
-		};
+		// FitAddon owns its own debounced ResizeObserver — we don't need a separate
+		// one. It computes cols/rows from the container's clientWidth/Height + the
+		// font metrics, then calls terminal.resize() which resizes the canvas bitmap
+		// to its natural pixel dimensions. No CSS stretching, no aspect distortion.
+		this.fitAddon.fit();
+		this.fitAddon.observeResize();
 	}
 
 	// ── Helper process ───────────────────────────────────────────────────────
@@ -208,7 +196,6 @@ class TerminalView extends ItemView {
 			PATH: [path.dirname(bunPath), env.PATH].filter(Boolean).join(path.delimiter),
 		};
 
-		const { cols, rows } = this.gridSize();
 		try {
 			this.helper = spawn(bunPath, [helperPath, ...argv], {
 				cwd,
@@ -244,8 +231,10 @@ class TerminalView extends ItemView {
 		});
 		this.helper.on("error", (err) => this.fail("Helper error", err));
 
-		// Send initial size before the shell prints its first prompt.
-		this.sendResize(rows, cols);
+		// Push the current grid size to the helper. FitAddon ran during initTerminal
+		// and sized the terminal to the container; emit that size now so the shell
+		// wraps correctly from its very first prompt.
+		if (this.terminal) this.sendResize(this.terminal.rows, this.terminal.cols);
 
 		// Context bridge — only if enabled.
 		if (this.plugin.settings.shareObsidianContext) {
@@ -269,12 +258,6 @@ class TerminalView extends ItemView {
 		}
 		this.helper = null;
 		this.resizePipe = null;
-	}
-
-	private handleResize(): void {
-		const { cols, rows } = this.gridSize();
-		this.terminal?.resize(cols, rows);
-		this.sendResize(rows, cols);
 	}
 
 	private sendResize(rows: number, cols: number): void {
