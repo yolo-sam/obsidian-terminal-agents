@@ -1,273 +1,205 @@
-# Ghostty Terminal for Obsidian
+# Terminal for Agents
 
-> A true Ghostty-powered terminal pane embedded inside Obsidian — same VT parser as the native Ghostty app, no Electron quirks, no xterm.js compromises.
+An Obsidian plugin that opens a real Ghostty terminal pane inside your vault — and gives the agent running in that shell live awareness of what you're looking at in Obsidian.
 
-[![Obsidian plugin](https://img.shields.io/badge/Obsidian-Plugin-7C3AED?logo=obsidian&logoColor=white)](https://obsidian.md)
-[![Version](https://img.shields.io/badge/version-0.1.3-blue)](./manifest.json)
-[![Desktop only](https://img.shields.io/badge/desktop-only-orange)](./manifest.json)
-[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+![Demo: terminal pane showing OBSIDIAN_* env vars, obs-ctx command output, and the shell prompt](docs/images/terminal-demo.png)
 
 ---
 
-## What is this?
+## Why this exists
 
-**Ghostty Terminal** embeds a fully functional, real terminal inside your Obsidian vault pane. Under the hood it uses:
+The state of the art in agent workflows is a terminal next to your editor. If your editor is Obsidian (notes-first, no built-in terminal, no native LSP), you currently solve that by stacking your tmux session beside Obsidian and tab-switching.
 
-- **[ghostty-web](https://github.com/ghostty-org/ghostty)** — the official Ghostty VT parser compiled to WebAssembly (WASM). This is the same `libghostty-vt` engine that powers the native Ghostty terminal app on macOS and Linux.
-- **A Python PTY proxy** (`pty_helper.py`) — spawns your actual shell in a real pseudo-terminal (PTY) and proxies I/O between it and the WASM terminal renderer. Uses Python's stdlib `pty` module — no native Node addons required.
-- **Canvas renderer** — `ghostty-web`'s `CanvasRenderer` draws the terminal to a `<canvas>` element pixel-perfectly using exact font metrics.
+That stack has two problems:
 
-This is **not** a wrapper around xterm.js. You get real Ghostty VT semantics: proper Unicode (grapheme clusters, wide chars), 256-color + truecolor, OSC 8 hyperlinks, Kitty graphics protocol, and more.
+1. **The terminal lives in a separate window.** It's not pinned to the vault you're working on. Closing/reopening Obsidian or switching desktops desyncs the two.
+2. **The agent in that terminal doesn't know what you're reading.** You're staring at a note about Q2 planning and asking Claude Code for help, but Claude doesn't know which note you're looking at. You either paste the path manually every time, or the agent operates without that context.
 
+This plugin solves both. The terminal lives inside Obsidian as a pinned pane. The agent in that terminal gets a live JSON snapshot of your workspace state (active tab, open tabs, vault path) plus an `obs-ctx` shell function to query it. No copy-paste, no manual context.
 
-## Screenshots
+## Who it's for
 
-![alt text](images/screenshot.png)
-![alt text](images/screenshot2.png)
+You, if all of these are true:
 
----
+- You use Obsidian as a primary work surface (notes, planning, knowledge).
+- You run agents from a terminal (Claude Code, codex, aider, etc.) — not just from IDE plugins.
+- You want the agent to know what you're looking at, automatically.
 
-## Features
+Not for you if:
 
-| Feature | Details |
-|---|---|
-| 🖥️ **Real Ghostty VT parser** | `ghostty-web` WASM — identical behavior to native Ghostty |
-| 🎨 **Your Ghostty config** | Auto-reads `~/.config/ghostty/config` — font, font size, full 16-color palette |
-| 📐 **Pixel-perfect resize** | Canvas measures exact character cell dimensions; columns never misalign |
-| 🪟 **Multiple terminals / splits** | Each pane is fully independent; open as many as you need |
-| 📁 **File Explorer context menu** | Right-click any file or folder → **Open Ghostty Terminal here** |
-| 🔁 **Shell restart button** | If the shell exits, a ⟳ button appears inline — no plugin reload needed |
-| ⚙️ **Settings override** | Override shell, font, font size, and scrollback from Obsidian Settings |
-| 🚫 **No native addons** | Uses Python `pty` stdlib instead of `node-pty` — no `electron-rebuild` needed |
+- You don't run agents from a shell at all.
+- You're on Windows. (v1 is macOS/Linux only — see [Roadmap](#roadmap).)
 
----
+## How it works in 30 seconds
 
-## Requirements
-
-| Requirement | Minimum version |
-|---|---|
-| [Obsidian](https://obsidian.md) | 1.6.0 (desktop only) |
-| macOS / Linux | Any modern version |
-| Python | 3.8+ (ships with macOS and most Linux distros) |
-| Node.js | 18+ *(only needed to build from source)* |
-
-> **Windows:** The PTY proxy does not currently support Windows. macOS and Linux are fully supported.
-
----
-
-## Installation
-
-### Option A — BRAT (recommended for early access)
-
-[BRAT](https://github.com/TfTHacker/obsidian42-brat) lets you install plugins directly from GitHub without waiting for community approval.
-
-1. Install the **BRAT** plugin from Obsidian Community Plugins
-2. Open BRAT settings → **Add Beta Plugin**
-3. Enter the repository URL:
-   ```
-   https://github.com/lavs9/obsidian-ghostty-terminal
-   ```
-4. Click **Add Plugin** — BRAT will download and install it automatically
-5. Go to **Settings → Community plugins** and enable **Ghostty Terminal**
-
-### Option B — Manual install from GitHub release
-
-1. Go to the [Releases page](https://github.com/lavs9/obsidian-ghostty-terminal/releases) and download the latest release assets:
-   - `main.js`
-   - `manifest.json`
-   - `styles.css`
-   - `pty_helper.py`
-
-2. Create the plugin folder in your vault:
-   ```bash
-   mkdir -p /path/to/your-vault/.obsidian/plugins/ghostty-terminal
-   ```
-
-3. Copy the downloaded files into that folder
-
-4. In Obsidian: **Settings → Community plugins → Toggle "Restricted mode" OFF → Enable "Ghostty Terminal"**
-
-### Option C — Build from source
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/lavs9/obsidian-ghostty-terminal
-cd obsidian-ghostty-terminal
-
-# 2. Install dependencies
-npm install
-
-# 3. Build
-npm run build
-
-# 4. Copy plugin files to your vault
-VAULT=~/path/to/your-vault
-mkdir -p "$VAULT/.obsidian/plugins/ghostty-terminal"
-cp main.js manifest.json styles.css pty_helper.py "$VAULT/.obsidian/plugins/ghostty-terminal/"
-
-# 5. Enable in Obsidian
-# Settings → Community plugins → Enable "Ghostty Terminal"
+```
+┌─ Obsidian ─────────────────────────────────────────────┐
+│                                                        │
+│  Your notes pane            │  Terminal for Agents     │
+│  (active.md is here)        │  ┌───────────────────┐   │
+│                             │  │ smcllns@air ~ %   │   │
+│                             │  │ claude            │   │
+│                             │  │ > help me edit ...│   │
+│                             │  └───────────────────┘   │
+│                                       │                │
+│        workspace events ──────────────┤                │
+│                                       ▼                │
+│                              context.json (atomic)     │
+│                              OBSIDIAN_* env vars       │
+│                              obs-ctx shell function    │
+│                                                        │
+└────────────────────────────────────────────────────────┘
 ```
 
-#### Development (hot-reload)
+The plugin:
 
-```bash
-# Symlink the repo directly into your vault's plugins folder for development
-ln -s "$(pwd)" ~/path/to/your-vault/.obsidian/plugins/ghostty-terminal
+1. Renders a real Ghostty VT in an Obsidian pane (via `ghostty-web` WASM). Not xterm.js — real Ghostty parser, Unicode-correct, OSC 8 hyperlinks, etc.
+2. Spawns your `$SHELL` through a tiny Bun-based PTY helper (~50 lines). No `node-pty`, no `electron-rebuild`.
+3. Subscribes to Obsidian's `active-leaf-change` and `layout-change`. On any change it atomically writes the active tab + open tabs to a JSON file (~100ms debounced).
+4. Sets `OBSIDIAN_VAULT`, `OBSIDIAN_VAULT_NAME`, `OBSIDIAN_CONTEXT_FILE` in the shell environment, and sources a one-line `obs-ctx` shell function so the agent can read the JSON with a single command.
+5. For Claude Code specifically, it wraps `claude` with an `--append-system-prompt` that tells Claude where the vault is and where to find the context file. Claude reads it as needed.
 
-# Start the watcher — rebuilds on every save
-npm run dev
-```
+## Install
 
-Install the [Hot-Reload plugin](https://github.com/pjeby/hot-reload) in Obsidian to auto-reload the plugin on file change.
+**Requires:** Obsidian 1.7.2+, macOS or Linux, [Bun](https://bun.sh) installed locally (the PTY helper runs on it).
 
----
+### Option A — BRAT (recommended for early users)
 
-## Usage
+1. Install the [BRAT](https://github.com/TfTHacker/obsidian42-brat) community plugin
+2. BRAT settings → **Add Beta Plugin** → `https://github.com/yolo-sam/obsidian-terminal-agents`
+3. Settings → Community plugins → enable **Terminal for Agents**
 
-### Opening a terminal
+### Option B — Manual
 
-| Action | How |
-|---|---|
-| Open terminal | Click the **terminal** icon in the left ribbon, or run command **"Open Ghostty Terminal"** |
-| Open in new split | Command palette: **"Open Ghostty Terminal in new split"** |
-| Open at a specific path | Right-click any file or folder in the File Explorer → **"Open Ghostty Terminal here"** |
-| Restart shell | Click the **⟳ Restart shell** button that appears when the shell exits |
+Download the latest release assets (`main.js`, `manifest.json`, `helper.ts`, `shellrc.sh`, `styles.css`) into `<vault>/.obsidian/plugins/obsidian-terminal-agents/` and enable from Settings → Community plugins.
 
-### Keyboard shortcuts
+## Quick start
 
-You can assign custom hotkeys to **"Open Ghostty Terminal"** via **Settings → Hotkeys**.
+1. Open the command palette → **Open terminal**. (Or click the terminal ribbon icon.)
+2. The pane spawns your `$SHELL` with the vault as the working directory.
+3. Try:
 
----
+   ```sh
+   obs-ctx                       # full context JSON
+   obs-ctx .activeTab.path       # just the path of the open note
+   obs-ctx .openTabs[].path      # paths of every open tab
+   echo "$OBSIDIAN_VAULT"        # absolute vault path
+   ```
 
-## Configuration
+4. Run `claude` — it'll know which vault you're in and where to read live context.
 
-### Ghostty config auto-detection
+## Settings (4 knobs)
 
-The plugin automatically reads your Ghostty config from:
-- **macOS:** `~/Library/Application Support/com.mitchellh.ghostty/config`
-- **Linux:** `~/.config/ghostty/config`
-
-The following config keys are recognized:
-
-| Ghostty key | Effect |
-|---|---|
-| `font-family` | Terminal font family |
-| `font-size` | Terminal font size (pt) |
-| `background` | Background color |
-| `foreground` | Foreground/text color |
-| `cursor-color` | Cursor color |
-| `palette = N=RRGGBB` | All 16 ANSI color entries |
-| `cursor-style` | `block` / `underline` / `bar` |
-| `cursor-style-blink` | `true` / `false` |
-| `scrollback-limit` | Lines of scrollback buffer |
-| `command` | Default shell command |
-
-### Plugin settings
-
-Override any Ghostty config value from **Obsidian → Settings → Ghostty Terminal**:
-
-| Setting | Default | Description |
+| Setting | Default | What it does |
 |---|---|---|
-| Config file path | *(auto-detect)* | Explicit path to your Ghostty config file |
-| Default shell | `$SHELL` env var | Shell binary to spawn (e.g. `/bin/fish`) |
-| Font family override | *(from Ghostty config)* | Override font, e.g. `"Fira Code"` |
-| Font size override | *(from Ghostty config)* | Point size, e.g. `14` |
-| Scrollback lines | `10000` | Number of lines in the scrollback buffer |
+| **Default shell** | `$SHELL` | Absolute path of the shell to spawn. |
+| **Font size** | `13` | Terminal font size in pixels. |
+| **Agent scope** | Vault root | Where the shell opens (vault root / active note's folder / custom path). Agents inherit this as `cwd`. |
+| **Share Obsidian context with terminal** | ON | When ON: writes the JSON file, sets `OBSIDIAN_*` env vars, sources `obs-ctx` + wraps `claude`. Toggle OFF for a plain terminal. |
 
----
+## How the agent gets context
+
+When the toggle is ON, the plugin gives the spawned shell three things:
+
+**1. Environment variables** (so any agent can read them, no plugin-specific knowledge needed):
+
+```
+OBSIDIAN_VAULT=/absolute/path/to/vault
+OBSIDIAN_VAULT_NAME=Vault Display Name
+OBSIDIAN_CONTEXT_FILE=/tmp/.../context.json
+OBSIDIAN_CWD=/absolute/path/where/the/shell/opened
+```
+
+**2. A live JSON snapshot** at `$OBSIDIAN_CONTEXT_FILE`, atomic-written on every workspace event:
+
+```json
+{
+  "updatedAt": 1779260123,
+  "vault": { "name": "Vault", "path": "/Users/sam/vault" },
+  "activeTab": { "leafId": "abc", "path": "notes/foo.md", "type": "markdown", "title": "Foo", "isActive": true, "isPinned": false },
+  "openTabs": [
+    { "leafId": "abc", "path": "notes/foo.md", ... },
+    { "leafId": "def", "path": "ref/x.html", ... }
+  ]
+}
+```
+
+**3. A shell helper** (`obs-ctx`) wired into bash/zsh:
+
+```sh
+obs-ctx                    # full JSON, via jq if available
+obs-ctx .activeTab         # just the active tab object
+obs-ctx '.openTabs[].path' # quote-paths for zsh's pattern matching
+```
+
+**4. A `claude` wrapper** that injects an `--append-system-prompt` so Claude Code knows the vault and context-file paths without needing any plugin awareness. Other agents (codex, aider, …) read the env vars themselves.
 
 ## Architecture
 
 ```
-obsidian-ghostty-terminal/
-├── main.ts                   Plugin entry + GhosttyTerminalView
-│                               - Registers view, ribbon, commands, context menu
-│                               - Boots ghostty-web WASM on startup
-│                               - Manages Terminal lifecycle (init, resize, dispose)
-│                               - Spawns pty_helper.py and proxies I/O
-├── src/
-│   ├── ghostty-config.ts     Ghostty config file parser
-│   │                           - Auto-detects config location on macOS + Linux
-│   │                           - Parses font, colors, cursor, scrollback, shell
-│   └── settings.ts           Plugin settings schema + Obsidian SettingTab UI
-├── pty_helper.py             Python PTY proxy (Unix only)
-│                               - Forks a real PTY via Python stdlib `pty.fork()`
-│                               - Proxies stdin/stdout between JS and shell
-│                               - Reads 4-byte resize frames on fd 3 (rows, cols)
-│                               - Calls TIOCSWINSZ to resize the PTY kernel window
-├── styles.css                Plugin CSS — scoped .ghostty-* classes
-├── manifest.json             Obsidian plugin manifest
-└── esbuild.config.mjs        Build config — bundles main.ts + ghostty-web WASM
+┌─ main.js (TypeScript, runs in Obsidian renderer) ─┐
+│                                                   │
+│   TerminalAgentsPlugin                            │
+│   ├── ItemView                                    │
+│   │   ├── ghostty-web Terminal (canvas render)    │
+│   │   ├── spawn() → bun helper.ts → /bin/zsh      │
+│   │   └── ResizeObserver → fd 3 → terminal.resize │
+│   │                                               │
+│   └── ContextBridge                               │
+│       ├── workspace events (active-leaf, layout)  │
+│       └── atomic JSON write (debounced 100ms)     │
+│                                                   │
+└───────────────────────────────────────────────────┘
+
+helper.ts (Bun, runs as child of plugin)
+├── Bun.spawn({ terminal: { … } })  ← Bun's native PTY
+├── stdin pipe → terminal.write
+├── terminal.data → stdout pipe
+└── fd 3 → 4-byte uint16 frames → terminal.resize
 ```
 
-### How the PTY bridge works
+**Why Bun for the PTY:** Bun 1.3+ has a built-in PTY via `Bun.spawn({ terminal: … })`. No native addons, no `electron-rebuild`, no `node-pty` (which has historically broken on every Electron upgrade). The helper is ~50 lines. If you already use Bun for anything, you have zero new dependencies.
 
-```
-Obsidian (Electron/Node.js)
-        │
-        ▼
-  child_process.spawn("python3 pty_helper.py /bin/zsh")
-        │ stdin  ──────────────────────────────► PTY master fd
-        │ stdout ◄────────────────────────────── PTY master fd
-        │ stdio[3] (resize pipe, write-only) ──► ioctl TIOCSWINSZ
-        │
-        ▼
-  ghostty-web Terminal (WASM + Canvas)
-    - terminal.write(data)    ← stdout bytes from PTY
-    - terminal.onData(cb)     → stdin bytes to PTY
-    - terminal.resize(c, r)   → 4-byte frame to resize pipe
-```
-
-### Why Python instead of node-pty?
-
-`node-pty` is a native Node.js addon that requires recompilation against Electron's version of V8 (`electron-rebuild`). This is fragile and breaks on Obsidian updates. Python's `pty` module is part of the standard library and works out of the box on any macOS or Linux machine — no compilation needed.
-
----
-
-## Troubleshooting
-
-### Terminal shows "pty_helper.py not found"
-
-Make sure `pty_helper.py` is in the same folder as `main.js` inside `.obsidian/plugins/ghostty-terminal/`. If you installed from source, re-run the copy step.
-
-### Shell doesn't start / shows Python error
-
-1. Verify Python 3 is available: `which python3`
-2. Check Obsidian's developer console (**View → Toggle Developer Tools → Console**) for the full error
-
-### Font looks wrong or spacing is off
-
-Set an explicit font in **Settings → Ghostty Terminal → Font family override**. Use a monospace font installed on your system, e.g. `"Menlo"`, `"Monaco"`, `"Fira Code"`, or `"JetBrains Mono"`.
-
-### Colors don't match my Ghostty theme
-
-The plugin reads your Ghostty config automatically. If colors look wrong:
-1. Check **Settings → Ghostty Terminal → Config file path** — leave blank for auto-detection
-2. Open the developer console and look for a `[GhosttyTerminal] config:` log line to see what was parsed
-
----
-
-## Contributing
-
-Pull requests are welcome! Please:
-
-1. Fork the repo and create a feature branch
-2. Run `npm run build` to verify there are no TypeScript errors
-3. Test in Obsidian with a real vault before submitting
-
----
+**Why Ghostty over xterm.js:** ghostty-web is the same `libghostty-vt` parser that powers the native Ghostty app, compiled to WASM. Correct Unicode (grapheme clusters, wide chars), OSC 8 hyperlinks, Kitty graphics protocol, modern keyboard protocol — all things xterm.js partially supports and Ghostty just does. The WASM is ~700KB, inlined into `main.js`.
 
 ## Roadmap
 
-- [ ] Obsidian theme sync (auto-switch light/dark palette)
-- [ ] OSC 633 shell integration (prompt anchoring, command detection)
-- [ ] Tab bar for multiple terminals in a single pane
-- [ ] Windows support via ConPTY
-- [ ] Submit to Obsidian Community Plugins registry
+v1 ships intentionally small. Likely next iterations, in rough priority order:
 
----
+- **Windows support** — currently macOS/Linux only; Bun's PTY is POSIX-only and we'd need a different path on Windows.
+- **MCP server transport** — instead of a JSON snapshot file, expose context as an MCP server inside the plugin. Agents like Claude Code subscribe and get live notifications + bidirectional ops (focus this tab, open this file). Removes the polling cost.
+- **Per-leaf terminals** — multiple terminal panes, each scoped to its own context (e.g. one per active note, vs. one global).
+- **Selection + cursor position in context** — for "edit this paragraph"-style requests.
+- **Path allowlist/denylist** — finer-grained agent scope than just cwd.
+
+See [`HANDOFF.md`](HANDOFF.md) for the full design rationale and what we'd build next if we had another day.
+
+## Development
+
+```sh
+git clone https://github.com/yolo-sam/obsidian-terminal-agents
+cd obsidian-terminal-agents
+bun install
+bun run build          # writes main.js
+bun run dev            # watch mode
+```
+
+Sideload into a test vault:
+
+```sh
+mkdir -p <vault>/.obsidian/plugins/obsidian-terminal-agents
+cp main.js manifest.json styles.css helper.ts shellrc.sh \
+   <vault>/.obsidian/plugins/obsidian-terminal-agents/
+```
+
+Then in Obsidian: Settings → Community plugins → Reload → enable.
+
+## Credits
+
+Forks and substantially rewrites [`lavs9/obsidian-ghostty-terminal`](https://github.com/lavs9/obsidian-ghostty-terminal). What's different: Bun PTY helper instead of Python; no Ghostty config parsing (use Obsidian CSS vars instead); no multi-pane / file-explorer menu; no node-pty; live workspace context bridge for agents — the whole reason this exists.
+
+`ghostty-web` is by [@ghostty-org](https://github.com/ghostty-org/ghostty).
 
 ## License
 
-MIT © [Mayank Lavania](https://github.com/lavs9)
+MIT.

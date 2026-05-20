@@ -1,0 +1,3 @@
+[install]
+# Pin against npm install determinism; avoid surprise hot-off-the-press packages
+minimumReleaseAge = 86400

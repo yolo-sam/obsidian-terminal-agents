@@ -1,45 +1,39 @@
 {
-    "name": "obsidian-ghostty-terminal",
-    "version": "0.2.0",
-    "description": "Ghostty Terminal for Obsidian",
-    "main": "main.js",
-    "scripts": {
-        "dev": "node esbuild.config.mjs",
-        "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-        "lint": "eslint .",
-        "version": "node version-bump.mjs && git add manifest.json versions.json"
-    },
-    "dependencies": {
-        "ghostty-web": "^0.4.0",
-        "node-pty": "^1.1.0",
-        "node-pty-prebuilt-multiarch": "^0.10.1-pre.5"
-    },
-    "devDependencies": {
-        "@eslint/eslintrc": "^3.3.4",
-        "@types/node": "^20",
-        "@typescript-eslint/eslint-plugin": "^8.56.1",
-        "@typescript-eslint/parser": "^8.56.1",
-        "esbuild": "0.21.5",
-        "eslint": "^9.39.3",
-        "eslint-plugin-obsidianmd": "^0.1.9",
-        "globals": "^17.4.0",
-        "obsidian": "latest",
-        "tslib": "2.6.2",
-        "typescript": "5.5.4"
-    },
-    "directories": {
-        "doc": "docs"
-    },
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/lavs9/obsidian-ghostty-terminal.git"
-    },
-    "keywords": [],
-    "author": "",
-    "license": "ISC",
-    "type": "commonjs",
-    "bugs": {
-        "url": "https://github.com/lavs9/obsidian-ghostty-terminal/issues"
-    },
-    "homepage": "https://github.com/lavs9/obsidian-ghostty-terminal#readme"
+	"name": "obsidian-terminal-agents",
+	"version": "0.1.0",
+	"description": "Embedded Ghostty terminal pane with live vault context for agents (Claude Code, etc.).",
+	"main": "main.js",
+	"scripts": {
+		"build": "bun build main.ts --outfile=main.js --target=node --format=cjs --external=obsidian --external=electron",
+		"dev": "bun build main.ts --outfile=main.js --target=node --format=cjs --external=obsidian --external=electron --watch",
+		"lint": "eslint ."
+	},
+	"dependencies": {
+		"ghostty-web": "^0.4.0"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.1.0",
+		"@types/node": "^20",
+		"obsidian": "latest",
+		"typescript": "5.5.4"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/yolo-sam/obsidian-terminal-agents.git"
+	},
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"terminal",
+		"ghostty",
+		"agents",
+		"claude-code"
+	],
+	"author": "smcllns",
+	"license": "MIT",
+	"type": "commonjs",
+	"bugs": {
+		"url": "https://github.com/yolo-sam/obsidian-terminal-agents/issues"
+	},
+	"homepage": "https://github.com/yolo-sam/obsidian-terminal-agents#readme"
 }

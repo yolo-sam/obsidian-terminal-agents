@@ -1,14 +1,8 @@
 # Dependencies
 node_modules/
 
-# Build cache / local dev tool state
-.bv/
-.cass/
-
 # macOS
 .DS_Store
-.AppleDouble
-.LSOverride
 
 # Editor
 .vscode/
@@ -20,10 +14,7 @@ node_modules/
 .env
 .env.local
 
-# NOTE: main.js IS committed intentionally — Obsidian loads it directly.
-# To exclude it from the repo (source-only mode), uncomment the next line:
-# main.js
+# Bun
+bun.lockb
 
-# Dolt database files (added by bd init)
-.dolt/
-*.db
+# NOTE: main.js IS committed intentionally — Obsidian loads it directly.

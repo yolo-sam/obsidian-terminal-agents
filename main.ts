@@ -1,606 +1,425 @@
+//
+// main.ts — Terminal for Agents (obsidian-terminal-agents).
+//
+// An Obsidian ItemView hosting a Ghostty terminal pane backed by a Bun PTY
+// helper. Agents running in the pane (Claude Code, codex, etc.) receive live
+// Obsidian context via env vars + a JSON file the plugin keeps current.
+//
+
+import { ItemView, type Menu, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
+import { init as initGhosttyWasm, Terminal } from "ghostty-web";
+import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { ContextBridge } from "./context";
 import {
-    ItemView,
-    Menu,
-    Notice,
-    Plugin,
-    TAbstractFile,
-    TFile,
-    WorkspaceLeaf,
-    ViewStateResult,
-} from 'obsidian';
-import { init as initGhosttyWasm, Terminal, FitAddon } from 'ghostty-web';
-import * as os from 'os';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as child_process from 'child_process';
+	DEFAULT_SETTINGS,
+	type TerminalAgentsSettings,
+	TerminalAgentsSettingTab,
+} from "./settings";
 
-import { parseGhosttyConfig, GhosttyConfig, GhosttyKeybind } from './src/ghostty-config';
-import { GhosttySettingTab, GhosttyTerminalSettings, DEFAULT_SETTINGS } from './src/settings';
+const VIEW_TYPE = "terminal-agents";
 
-import ptyHelperCode from './pty_helper.py';
+// ─── Plugin ───────────────────────────────────────────────────────────────────
 
-const VIEW_TYPE_GHOSTTY = 'ghostty-terminal';
+export default class TerminalAgentsPlugin extends Plugin {
+	settings: TerminalAgentsSettings = DEFAULT_SETTINGS;
+	private wasmInitPromise: Promise<void> | null = null;
 
-// ─── Plugin ──────────────────────────────────────────────────────────────────
+	async onload(): Promise<void> {
+		await this.loadSettings();
 
-export default class GhosttyTerminalPlugin extends Plugin {
-    settings: GhosttyTerminalSettings;
-    ghosttyConfig: GhosttyConfig;
-    private wasmReady = false;
+		this.registerView(VIEW_TYPE, (leaf) => new TerminalView(leaf, this));
 
-    async onload() {
-        // 1. Load settings
-        await this.loadSettings();
+		this.addRibbonIcon("terminal", "Open terminal", () => void this.activate());
+		this.addCommand({
+			id: "open",
+			name: "Open terminal",
+			callback: () => void this.activate(),
+		});
 
-        // 2. Parse Ghostty config once at boot
-        this.ghosttyConfig = parseGhosttyConfig(this.settings.ghosttyConfigPath || undefined);
+		this.addSettingTab(new TerminalAgentsSettingTab(this.app, this));
+	}
 
-        // 3. Boot Ghostty WASM
-        try {
-            await initGhosttyWasm();
-            this.wasmReady = true;
-        } catch (e) {
-            console.error('[GhosttyTerminal] Failed to init WASM:', e);
-            new Notice('Wasm failed to load. Check console.', 8000);
-        }
+	async onunload(): Promise<void> {
+		// Detaching the leaf triggers the view's onClose, which kills its helper.
+		this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => leaf.detach());
+	}
 
-        // 4. Register view
-        this.registerView(VIEW_TYPE_GHOSTTY, (leaf) => new GhosttyTerminalView(leaf, this));
+	async loadSettings(): Promise<void> {
+		const data = (await this.loadData()) as Partial<TerminalAgentsSettings> | null;
+		this.settings = { ...DEFAULT_SETTINGS, ...(data ?? {}) };
+	}
 
-        // 5. Ribbon icon
-        this.addRibbonIcon('terminal', 'Open terminal', () => this.activateView());
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
+	}
 
-        // 6. Commands
-        this.addCommand({
-            id: 'open',
-            name: 'Open terminal',
-            callback: () => this.activateView(),
-        });
+	/** Lazily load the ghostty-vt WASM. Cached: only loaded once per plugin instance. */
+	ensureWasmLoaded(): Promise<void> {
+		if (!this.wasmInitPromise) this.wasmInitPromise = initGhosttyWasm();
+		return this.wasmInitPromise;
+	}
 
-        this.addCommand({
-            id: 'open-split',
-            name: 'Open terminal in new split',
-            callback: () => this.activateView(true, 'split'),
-        });
-
-        // 7. Context menu on file explorer
-        this.registerEvent(
-            this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
-                const targetPath = file instanceof TFile
-                    ? path.dirname(file.path)
-                    : file.path; // TFolder
-
-                menu.addItem((item) =>
-                    item
-                        .setTitle('Open terminal here')
-                        .setIcon('terminal')
-                        .onClick(() => this.activateViewAt(targetPath))
-                );
-            })
-        );
-
-        // 8. Settings tab
-        this.addSettingTab(new GhosttySettingTab(this.app, this));
-    }
-
-    onunload() {
-        // Kill all pty processes in active terminal views
-        this.app.workspace.getLeavesOfType(VIEW_TYPE_GHOSTTY).forEach((leaf) => {
-            const view = leaf.view as GhosttyTerminalView;
-            view.killPty();
-        });
-    }
-
-    async loadSettings() {
-        const data = await this.loadData() as Partial<GhosttyTerminalSettings> | null;
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    }
-
-    async saveSettings() {
-        await this.saveData(this.settings);
-    }
-
-    private getNewLeaf(location: string): WorkspaceLeaf {
-        switch (location) {
-            case 'left':
-                return this.app.workspace.getLeftLeaf(false)!;
-            case 'tab':
-                return this.app.workspace.getLeaf('tab');
-            case 'split':
-                return this.app.workspace.getLeaf('split');
-            case 'window':
-                return this.app.workspace.getLeaf('window');
-            case 'right':
-            default:
-                return this.app.workspace.getRightLeaf(false)!;
-        }
-    }
-
-    /** Open (or focus) a terminal. */
-    async activateView(forceNew = false, locationOverride?: string) {
-        const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_GHOSTTY);
-
-        if (!forceNew && existing.length > 0) {
-            void this.app.workspace.revealLeaf(existing[0]);
-            return;
-        }
-
-        const location = locationOverride || this.settings.defaultLocation;
-        const leaf = this.getNewLeaf(location);
-        await leaf.setViewState({ type: VIEW_TYPE_GHOSTTY, active: true });
-        void this.app.workspace.revealLeaf(leaf);
-    }
-
-    /** Open a terminal seeded with a specific vault-relative cwd. */
-    async activateViewAt(vaultRelativePath: string) {
-        const leaf = this.getNewLeaf(this.settings.defaultLocation);
-        await leaf.setViewState({
-            type: VIEW_TYPE_GHOSTTY,
-            active: true,
-            state: { cwd: vaultRelativePath },
-        });
-        void this.app.workspace.revealLeaf(leaf);
-    }
+	private async activate(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+		if (existing.length > 0) {
+			void this.app.workspace.revealLeaf(existing[0]);
+			return;
+		}
+		const leaf = this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: VIEW_TYPE, active: true });
+		void this.app.workspace.revealLeaf(leaf);
+	}
 }
 
 // ─── View ─────────────────────────────────────────────────────────────────────
 
-const CHAR_MEASURE_ID = 'ghostty-char-measure';
+class TerminalView extends ItemView {
+	private terminal: Terminal | null = null;
+	private helper: ChildProcess | null = null;
+	private resizePipe: NodeJS.WritableStream | null = null;
+	private contextBridge: ContextBridge | null = null;
+	private resizeObserver: ResizeObserver | null = null;
+	private termEl: HTMLElement | null = null;
+	private charWidth = 9;
+	private charHeight = 18;
 
-class GhosttyTerminalView extends ItemView {
-    private terminal: Terminal | null = null;
-    private fitAddon: FitAddon | null = null;
-    private ptyProcess: child_process.ChildProcess | null = null;
-    private resizePipe: import('stream').Writable | null = null;
-    private resizeObserver: ResizeObserver | null = null;
-    private charWidth = 9;
-    private charHeight = 18;
-    private termEl: HTMLElement | null = null;
-    private ptyAlive = false;
-    private restartBtn: HTMLElement | null = null;
-    private cwdOverride: string | null = null;
+	constructor(leaf: WorkspaceLeaf, private plugin: TerminalAgentsPlugin) {
+		super(leaf);
+	}
 
-    constructor(leaf: WorkspaceLeaf, private plugin: GhosttyTerminalPlugin) {
-        super(leaf);
-    }
+	getViewType(): string {
+		return VIEW_TYPE;
+	}
+	getDisplayText(): string {
+		return "Terminal";
+	}
+	getIcon(): string {
+		return "terminal";
+	}
 
-    getViewType(): string { return VIEW_TYPE_GHOSTTY; }
-    getDisplayText(): string { return 'Ghostty'; }
-    getIcon(): string { return 'terminal'; }
+	async onOpen(): Promise<void> {
+		const container = this.containerEl.children[1] as HTMLElement;
+		container.empty();
+		container.addClass("terminal-agents-container");
+		this.termEl = container.createDiv({ cls: "terminal-agents-term" });
 
-    /** Called by Obsidian when this view is re-opened with saved state */
-    setState(state: Record<string, unknown>, result: ViewStateResult): Promise<void> {
-        if (state && typeof state.cwd === 'string') {
-            this.cwdOverride = state.cwd;
-        }
-        return super.setState(state, result);
-    }
+		try {
+			await this.plugin.ensureWasmLoaded();
+		} catch (e) {
+			this.fail("Ghostty WASM failed to load", e);
+			return;
+		}
 
-    async onOpen() {
-        await Promise.resolve();
-        const container = this.containerEl.children[1] as HTMLElement;
-        container.empty();
-        container.addClass('ghostty-container');
+		this.measureChar();
+		this.initTerminal();
+		this.spawnHelper();
 
-        // Build a wrapper that fills the pane
-        const wrapper = container.createDiv({ cls: 'ghostty-wrapper' });
+		this.resizeObserver = new ResizeObserver(() => this.handleResize());
+		this.resizeObserver.observe(this.termEl);
+	}
 
-        // Status bar for errors/restart
-        wrapper.createDiv({ cls: 'ghostty-status-bar ghostty-hidden' });
-        this.restartBtn = wrapper.createDiv({ cls: 'ghostty-restart-btn ghostty-hidden' });
-        this.restartBtn.setText('Restart shell');
-        this.restartBtn.onclick = () => this.spawnPty();
+	async onClose(): Promise<void> {
+		this.resizeObserver?.disconnect();
+		this.resizeObserver = null;
+		this.killHelper();
+		this.contextBridge?.stop();
+		this.contextBridge = null;
+		this.terminal?.dispose?.();
+		this.terminal = null;
+	}
 
-        this.termEl = wrapper.createDiv({ cls: 'ghostty-term' });
+	// ── Terminal init ────────────────────────────────────────────────────────
 
-        // Measure char dimensions first so we pass correct cols/rows to PTY
-        this.measureCharDimensions();
+	private initTerminal(): void {
+		const fontFamily = "var(--font-monospace), Menlo, Monaco, monospace";
+		const fontSize = this.plugin.settings.fontSize;
+		// Theme keyed to Obsidian's CSS variables so the terminal matches the
+		// active Obsidian theme without parsing the user's Ghostty config.
+		const cssVar = (name: string, fallback: string) =>
+			getComputedStyle(this.containerEl).getPropertyValue(name).trim() || fallback;
+		const theme = {
+			background: cssVar("--background-primary", "#1e1e2e"),
+			foreground: cssVar("--text-normal", "#cdd6f4"),
+			cursor: cssVar("--text-accent", "#f5e0dc"),
+		};
 
-        this.initTerminal();
-        this.spawnPty();
+		this.terminal = new Terminal({ fontFamily, fontSize, theme });
+		this.terminal.open(this.termEl!);
+		// Keystrokes → helper stdin → shell.
+		this.terminal.onData((data: string) => {
+			this.helper?.stdin?.write(data, "utf8");
+		});
+	}
 
-        this.resizeObserver = new ResizeObserver(() => this.handleResize());
-        this.resizeObserver.observe(this.termEl);
-    }
+	private measureChar(): void {
+		const probe = this.containerEl.ownerDocument.createElement("canvas");
+		const ctx = probe.getContext("2d");
+		if (!ctx) return;
+		const fontSize = this.plugin.settings.fontSize;
+		ctx.font = `${fontSize}px var(--font-monospace), Menlo, Monaco, monospace`;
+		const m = ctx.measureText("W");
+		this.charWidth = Math.max(1, Math.ceil(m.width));
+		const ascent = m.actualBoundingBoxAscent ?? fontSize * 0.8;
+		const descent = m.actualBoundingBoxDescent ?? fontSize * 0.2;
+		this.charHeight = Math.max(1, Math.ceil((ascent + descent) * 1.2));
+	}
 
-    // ── Terminal init ──────────────────────────────────────────────────────────
+	private gridSize(): { cols: number; rows: number } {
+		const rect = this.termEl!.getBoundingClientRect();
+		return {
+			cols: Math.max(10, Math.floor(rect.width / this.charWidth)),
+			rows: Math.max(5, Math.floor(rect.height / this.charHeight)),
+		};
+	}
 
-    private initTerminal() {
-        const gc = this.plugin.ghosttyConfig;
-        const s = this.plugin.settings;
+	// ── Helper process ───────────────────────────────────────────────────────
 
-        const fontFamily = s.fontFamilyOverride || gc.fontFamily || 'Menlo, Monaco, "Courier New", monospace';
-        const fontSize = s.fontSizeOverride > 0 ? s.fontSizeOverride : (gc.fontSize ?? 13);
-        const scrollback = gc.scrollback ?? s.scrollbackLines;
+	private spawnHelper(): void {
+		const cwd = this.resolveCwd();
+		const env = this.buildEnv(cwd);
+		const { argv, extraEnv } = this.buildShellInvocation(env);
 
-        const theme: Record<string, string> = {
-            background: gc.colors.background ?? '#1e1e2e',
-            foreground: gc.colors.foreground ?? '#cdd6f4',
-            cursor: gc.colors.cursor ?? '#f5e0dc',
-            black: gc.colors.black ?? '#45475a',
-            red: gc.colors.red ?? '#f38ba8',
-            green: gc.colors.green ?? '#a6e3a1',
-            yellow: gc.colors.yellow ?? '#f9e2af',
-            blue: gc.colors.blue ?? '#89b4fa',
-            magenta: gc.colors.magenta ?? '#f5c2e7',
-            cyan: gc.colors.cyan ?? '#94e2d5',
-            white: gc.colors.white ?? '#bac2de',
-            brightBlack: gc.colors.brightBlack ?? '#585b70',
-            brightRed: gc.colors.brightRed ?? '#f38ba8',
-            brightGreen: gc.colors.brightGreen ?? '#a6e3a1',
-            brightYellow: gc.colors.brightYellow ?? '#f9e2af',
-            brightBlue: gc.colors.brightBlue ?? '#89b4fa',
-            brightMagenta: gc.colors.brightMagenta ?? '#f5c2e7',
-            brightCyan: gc.colors.brightCyan ?? '#94e2d5',
-            brightWhite: gc.colors.brightWhite ?? '#a6adc8',
-        };
+		const helperPath = this.helperPath();
+		if (!fs.existsSync(helperPath)) {
+			this.fail(`helper.ts not found at ${helperPath}`, null);
+			return;
+		}
 
-        this.terminal = new Terminal({
-            fontSize,
-            fontFamily,
-            theme,
-            scrollback,
-            cursorStyle: gc.cursorStyle ?? 'block',
-            cursorBlink: gc.cursorBlink ?? false,
-        });
+		// Obsidian launches with a minimal PATH (e.g. /usr/bin:/bin) that doesn't
+		// include $HOME/.bun/bin or Homebrew. Resolve bun via known locations so
+		// the user doesn't have to symlink it into /usr/local/bin.
+		const bunPath = resolveBun(env);
+		if (!bunPath) {
+			this.fail(
+				"Bun executable not found. Install Bun (https://bun.sh) — it's the runtime for the PTY helper.",
+				null,
+			);
+			return;
+		}
 
-        this.fitAddon = new FitAddon();
-        this.terminal.loadAddon(this.fitAddon);
+		const augmentedEnv = {
+			...env,
+			...extraEnv,
+			PATH: [path.dirname(bunPath), env.PATH].filter(Boolean).join(path.delimiter),
+		};
 
-        this.terminal.open(this.termEl!);
+		const { cols, rows } = this.gridSize();
+		try {
+			this.helper = spawn(bunPath, [helperPath, ...argv], {
+				cwd,
+				env: augmentedEnv,
+				stdio: ["pipe", "pipe", "inherit", "pipe"],
+			});
+		} catch (e) {
+			this.fail("Failed to spawn Bun helper", e);
+			return;
+		}
 
-        // Build the full keybind list: Ghostty defaults + user config.
-        // User config entries override defaults for the same key combo.
-        const effectiveKeybinds = buildEffectiveKeybinds(this.plugin.ghosttyConfig.keybinds);
+		const stdio = this.helper.stdio as unknown as NodeJS.WritableStream[];
+		this.resizePipe = stdio[3];
 
-        // Intercept keybinds in capture phase so Obsidian's global handlers
-        // never see the key events meant for the terminal.
-        this.termEl!.addEventListener('keydown', (e: KeyboardEvent) => {
-            const match = findKeybind(e, effectiveKeybinds);
-            if (!match) return;
+		this.helper.stdout?.on("data", (buf: Buffer) => {
+			this.terminal?.write(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+		});
+		this.helper.on("close", (code) => {
+			this.terminal?.write(`\r\n\x1b[33m[Process exited with code ${code ?? 0}. Reopen the pane to restart.]\x1b[0m\r\n`);
+			this.helper = null;
+			this.resizePipe = null;
+		});
+		this.helper.on("error", (err) => this.fail("Helper error", err));
 
-            const action = match.action;
+		// Send initial size before the shell prints its first prompt.
+		this.sendResize(rows, cols);
 
-            if (action === 'copy_to_clipboard') {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                const text = window.getSelection()?.toString() ?? '';
-                if (text) navigator.clipboard.writeText(text).catch(() => {/* ignore */});
+		// Context bridge — only if enabled.
+		if (this.plugin.settings.shareObsidianContext) {
+			this.contextBridge = new ContextBridge(this.app, env.OBSIDIAN_CONTEXT_FILE);
+			this.contextBridge.start();
+		}
+	}
 
-            } else if (action === 'paste_from_clipboard') {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                navigator.clipboard.readText().then(text => {
-                    if (this.ptyAlive && this.ptyProcess?.stdin && text) {
-                        this.ptyProcess.stdin.write(text, 'utf8');
-                    }
-                }).catch(() => {/* ignore */});
+	private killHelper(): void {
+		const proc = this.helper;
+		if (!proc) return;
+		try {
+			proc.stdin?.end();
+		} catch {
+			/* ignore */
+		}
+		try {
+			proc.kill("SIGTERM");
+		} catch {
+			/* ignore */
+		}
+		this.helper = null;
+		this.resizePipe = null;
+	}
 
-            } else if (action.startsWith('text:')) {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                const raw = action.slice(5);
-                const text = unescapeGhosttyText(raw);
-                if (this.ptyAlive && this.ptyProcess?.stdin) {
-                    this.ptyProcess.stdin.write(text, 'utf8');
-                }
+	private handleResize(): void {
+		const { cols, rows } = this.gridSize();
+		this.terminal?.resize(cols, rows);
+		this.sendResize(rows, cols);
+	}
 
-            } else {
-                // Action we can't implement (new_tab, new_window, etc.) —
-                // block Obsidian from stealing the key but let ghostty-web handle it.
-                e.stopPropagation();
-            }
-        }, { capture: true });
+	private sendResize(rows: number, cols: number): void {
+		if (!this.resizePipe) return;
+		const frame = Buffer.alloc(4);
+		frame.writeUInt16BE(rows, 0);
+		frame.writeUInt16BE(cols, 2);
+		try {
+			this.resizePipe.write(frame);
+		} catch {
+			/* helper may have just died */
+		}
+	}
 
-        // Try to rely on the FitAddon rather than calculating char dimensions manually
-        this.fitAddon.fit();
+	// ── Spawn config ─────────────────────────────────────────────────────────
 
-        // Re-measure now that font is applied (canvas measurement is more accurate)
-        this.measureCharDimensions();
-    }
+	private resolveCwd(): string {
+		const adapter = this.app.vault.adapter as unknown as { getBasePath?: () => string };
+		const vaultRoot = adapter.getBasePath?.() ?? os.homedir();
+		const settings = this.plugin.settings;
+		if (settings.agentScope === "custom" && settings.customScopePath) {
+			return settings.customScopePath;
+		}
+		if (settings.agentScope === "activeNoteFolder") {
+			const file = this.app.workspace.getActiveFile();
+			if (file) return path.join(vaultRoot, path.dirname(file.path));
+		}
+		return vaultRoot;
+	}
 
-    // ── PTY spawn / recovery (Python-based, no native addons) ─────────────────
+	private buildEnv(cwd: string): Record<string, string> {
+		const adapter = this.app.vault.adapter as unknown as { getBasePath?: () => string };
+		const vaultRoot = adapter.getBasePath?.() ?? os.homedir();
+		const vaultName = this.app.vault.getName();
+		const contextFile = path.join(
+			os.tmpdir(),
+			"obs-terminal-agents",
+			sanitize(vaultName),
+			"context.json",
+		);
+		fs.mkdirSync(path.dirname(contextFile), { recursive: true });
 
-    private spawnPty() {
-        // Kill previous process
-        if (this.ptyProcess) {
-            this.killPty();
-        }
+		return {
+			...(process.env as Record<string, string>),
+			TERM: "xterm-256color",
+			COLORTERM: "truecolor",
+			TERM_PROGRAM: "obsidian-terminal-agents",
+			OBSIDIAN_VAULT: vaultRoot,
+			OBSIDIAN_VAULT_NAME: vaultName,
+			OBSIDIAN_CONTEXT_FILE: contextFile,
+			OBSIDIAN_CWD: cwd,
+		};
+	}
 
-        const gc = this.plugin.ghosttyConfig;
-        const s = this.plugin.settings;
+	/**
+	 * Pick the right shell invocation per shell type and wire shellrc.sh in.
+	 * Bash → `--rcfile <stub>` that sources ~/.bashrc then ours.
+	 * Zsh  → `ZDOTDIR=<stub-dir>` containing a .zshrc that does the same.
+	 * Other → spawn the shell raw; user gets the env vars but no obs-ctx alias.
+	 */
+	private buildShellInvocation(env: Record<string, string>): {
+		argv: string[];
+		extraEnv: Record<string, string>;
+	} {
+		const shell = this.plugin.settings.defaultShell || env.SHELL || "/bin/zsh";
+		const shellName = path.basename(shell);
 
-        const shell =
-            s.defaultShell ||
-            gc.shell ||
-            process.env.SHELL ||
-            (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
+		if (!this.plugin.settings.shareObsidianContext) {
+			return { argv: [shell, "-i"], extraEnv: {} };
+		}
 
-        // Resolve cwd
-        const adapter = this.app.vault.adapter as unknown as { getBasePath?: () => string, getFullPath?: (p: string) => string };
-        const vaultRoot = adapter.getBasePath?.() ?? os.homedir();
-        const cwd = this.cwdOverride ? path.join(vaultRoot, this.cwdOverride) : vaultRoot;
+		// Stage shellrc in a tmp dir keyed to the vault so concurrent vaults don't
+		// trample each other. The source ships alongside the plugin (rather than
+		// being bundled into main.js) so it's editable on disk for debugging.
+		const stageDir = path.join(
+			os.tmpdir(),
+			"obs-terminal-agents",
+			sanitize(env.OBSIDIAN_VAULT_NAME ?? "default"),
+			"rc",
+		);
+		fs.mkdirSync(stageDir, { recursive: true });
+		const rcSrc = this.readShellrc();
+		const rcPath = path.join(stageDir, "shellrc.sh");
+		fs.writeFileSync(rcPath, rcSrc);
 
-        // Locate our bundled Python helper
-        // manifest.dir is vault-relative (e.g. ".obsidian/plugins/ghostty-terminal")
-        const pluginVaultDir: string | undefined = this.plugin.manifest.dir;
-        const helperPath = pluginVaultDir
-            ? adapter.getFullPath?.(`${pluginVaultDir}/pty_helper.py`) ??
-            path.join(vaultRoot, pluginVaultDir, 'pty_helper.py')
-            : path.join(__dirname, 'pty_helper.py');
+		if (shellName === "bash") {
+			const stub = path.join(stageDir, "bashrc-stub");
+			fs.writeFileSync(stub, `[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n. "${rcPath}"\n`);
+			return { argv: [shell, "--rcfile", stub, "-i"], extraEnv: {} };
+		}
+		if (shellName === "zsh") {
+			const zrc = path.join(stageDir, ".zshrc");
+			fs.writeFileSync(zrc, `[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"\n. "${rcPath}"\n`);
+			return { argv: [shell, "-i"], extraEnv: { ZDOTDIR: stageDir } };
+		}
+		// Unknown shell — context env vars still set, but no obs-ctx wrapper.
+		return { argv: [shell, "-i"], extraEnv: {} };
+	}
 
-        // Write the bundled python helper to the helper path if it is missing or different
-        try {
-            if (!fs.existsSync(helperPath) || fs.readFileSync(helperPath, 'utf8') !== ptyHelperCode) {
-                fs.writeFileSync(helperPath, ptyHelperCode, { encoding: 'utf8', mode: 0o755 });
-            }
-        } catch (e: unknown) {
-            const msg = `Failed to write pty_helper.py to ${helperPath} - ${e instanceof Error ? e.message : String(e)}`;
-            this.terminal?.write(`\x1b[31m${msg}\x1b[0m\r\n`);
-            this.restartBtn?.removeClass('ghostty-hidden');
-            new Notice(`Ghostty: ${msg}`, 8000);
-            return;
-        }
+	private helperPath(): string {
+		return this.pluginFile("helper.ts");
+	}
 
-        // Verify the helper exists
-        if (!fs.existsSync(helperPath)) {
-            const msg = `pty_helper.py not found at: ${helperPath}`;
-            this.terminal?.write(`\x1b[31m${msg}\x1b[0m\r\n`);
-            this.restartBtn?.removeClass('ghostty-hidden');
-            new Notice(`Ghostty: ${msg}`, 8000);
-            return;
-        }
+	private readShellrc(): string {
+		const p = this.pluginFile("shellrc.sh");
+		try {
+			return fs.readFileSync(p, "utf8");
+		} catch {
+			return "";
+		}
+	}
 
-        const { cols, rows } = this.terminalDimensions();
-        const python = process.platform === 'darwin' ? 'python3' : 'python3';
+	private pluginFile(name: string): string {
+		const manifestDir = this.plugin.manifest.dir;
+		const adapter = this.app.vault.adapter as unknown as { getFullPath?: (p: string) => string };
+		if (manifestDir && adapter.getFullPath) {
+			return adapter.getFullPath(`${manifestDir}/${name}`);
+		}
+		return path.join(__dirname, name);
+	}
 
-        try {
-            this.ptyProcess = child_process.spawn(
-                python,
-                [helperPath, shell],
-                {
-                    cwd,
-                    env: {
-                        ...process.env as Record<string, string>,
-                        TERM: 'xterm-256color',
-                        TERM_PROGRAM: 'obsidian-ghostty',
-                        COLORTERM: 'truecolor',
-                        COLUMNS: String(cols),
-                        LINES: String(rows),
-                    },
-                    // stdio[3] is our resize control pipe (write-only from JS side)
-                    stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
-                }
-            );
+	// ── Error helper ─────────────────────────────────────────────────────────
 
-            const stdioArr = this.ptyProcess.stdio as unknown as import('stream').Writable[];
-            this.resizePipe = stdioArr[3];
-
-            this.ptyAlive = true;
-            this.restartBtn?.addClass('ghostty-hidden');
-
-            // PTY output → terminal display
-            // No encoding set — receive raw Buffers so UTF-8 multi-byte
-            // sequences are preserved and decoded correctly by the VT parser.
-            this.ptyProcess.stdout?.on('data', (data: Buffer) => {
-                this.terminal?.write(
-                    new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-                    () => {
-                        this.terminal?.scrollToBottom();
-                    }
-                );
-            });
-
-            // Terminal input → PTY stdin
-            this.terminal?.onData((data: string) => {
-                if (this.ptyAlive && this.ptyProcess?.stdin) {
-                    // onData gives a JS string; write as UTF-8 bytes to the PTY
-                    this.ptyProcess.stdin.write(data, 'utf8');
-                }
-            });
-
-            this.ptyProcess.on('close', (code: number | null) => {
-                this.ptyAlive = false;
-                this.terminal?.write(
-                    `\r\n\x1b[31m[Process exited with code ${code ?? 0}]\x1b[0m\r\n`
-                );
-                this.restartBtn?.removeClass('ghostty-hidden');
-            });
-
-            this.ptyProcess.on('error', (err: Error) => {
-                this.ptyAlive = false;
-                this.terminal?.write(`\x1b[31m[PTY error: ${err.message}]\x1b[0m\r\n`);
-                this.restartBtn?.removeClass('ghostty-hidden');
-            });
-
-            new Notice(`Ghostty ready — ${path.basename(shell)} @ ${path.basename(cwd)}`, 3000);
-        } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            console.error('[GhosttyTerminal] Python PTY spawn failed:', e);
-            this.terminal?.write(`\x1b[31mFailed to start shell: ${msg}\x1b[0m\r\n`);
-            this.restartBtn?.removeClass('ghostty-hidden');
-            new Notice(`Ghostty: failed to start shell — ${msg}`, 8000);
-        }
-    }
-
-    // ── Resize (pixel-perfect) ─────────────────────────────────────────────────
-
-    /**
-     * Measures exact monospace character dimensions using a hidden canvas.
-     * This mirrors what xterm.js Fit addon does, giving pixel-perfect cols/rows.
-     */
-    private measureCharDimensions() {
-        // Reuse or create measurement element
-        let measure = activeDocument.getElementById(CHAR_MEASURE_ID);
-        if (!measure) {
-            measure = activeDocument.createElement('canvas');
-            measure.id = CHAR_MEASURE_ID;
-            measure.className = 'ghostty-char-measure';
-            activeDocument.body.appendChild(measure);
-        }
-
-        const canvas = measure as HTMLCanvasElement;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        const gc = this.plugin.ghosttyConfig;
-        const s = this.plugin.settings;
-        const fontFamily = s.fontFamilyOverride || gc.fontFamily || 'Menlo, Monaco, "Courier New", monospace';
-        const fontSize = s.fontSizeOverride > 0 ? s.fontSizeOverride : (gc.fontSize ?? 13);
-
-        ctx.font = `${fontSize}px ${fontFamily}`;
-        const measured = ctx.measureText('W');
-
-        this.charWidth = Math.ceil(measured.width);
-        // actualBoundingBoxAscent + Descent gives accurate line height if available
-        const ascent = measured.actualBoundingBoxAscent ?? fontSize * 0.8;
-        const descent = measured.actualBoundingBoxDescent ?? fontSize * 0.2;
-        this.charHeight = Math.ceil((ascent + descent) * 1.2); // ≈ line-height
-    }
-
-    private terminalDimensions(): { cols: number; rows: number } {
-        const el = this.termEl;
-        if (!el) return { cols: 80, rows: 24 };
-
-        const rect = el.getBoundingClientRect();
-        const cols = Math.max(10, Math.floor(rect.width / this.charWidth));
-        const rows = Math.max(5, Math.floor(rect.height / this.charHeight));
-        return { cols, rows };
-    }
-
-    private handleResize() {
-        if (!this.terminal || !this.fitAddon) return;
-
-        // Let the addon do the layout fitting
-        this.fitAddon.fit();
-
-        // PTY dimensions are kept in sync natively by terminal resize, but we need
-        // to re-calculate columns/rows to pass to the PTY explicitly via our pipe
-        const { cols, rows } = this.terminal;
-
-        if (this.ptyAlive && this.resizePipe) {
-            // Send 4-byte big-endian resize frame (rows uint16, cols uint16)
-            // Python's pty_helper.py reads this on fd 3 and calls TIOCSWINSZ
-            const frame = Buffer.alloc(4);
-            frame.writeUInt16BE(rows, 0);
-            frame.writeUInt16BE(cols, 2);
-            this.resizePipe.write(frame);
-        }
-    }
-
-    // ── Lifecycle ──────────────────────────────────────────────────────────────
-
-    killPty() {
-        const proc = this.ptyProcess;
-        if (proc) {
-            // Close all stdio pipes first — this triggers stdin-EOF in pty_helper.py
-            // which causes it to self-terminate even if SIGTERM is missed.
-            try { proc.stdin?.destroy(); } catch { /* ignore */ }
-            try { proc.stdout?.destroy(); } catch { /* ignore */ }
-            try { proc.stderr?.destroy(); } catch { /* ignore */ }
-            try { this.resizePipe?.destroy(); } catch { /* ignore */ }
-
-            // Send SIGTERM
-            try { proc.kill('SIGTERM'); } catch { /* ignore */ }
-
-            // Fallback: SIGKILL after a short delay in case SIGTERM is not handled
-            const pid = proc.pid;
-            if (pid) {
-                window.setTimeout(() => {
-                    try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch { /* already dead */ }
-                }, 500);
-            }
-
-            this.ptyProcess = null;
-        }
-        this.resizePipe = null;
-        this.ptyAlive = false;
-    }
-
-    onClose(): Promise<void> {
-        this.resizeObserver?.disconnect();
-        this.killPty();
-        this.terminal?.dispose?.();
-        this.fitAddon?.dispose?.();
-        this.terminal = null;
-        this.fitAddon = null;
-        return Promise.resolve();
-    }
+	private fail(msg: string, err: unknown): void {
+		const detail = err instanceof Error ? err.message : err ? String(err) : "";
+		const full = detail ? `${msg}: ${detail}` : msg;
+		console.error("[terminal-agents]", full);
+		new Notice(`Terminal: ${full}`, 8000);
+		this.terminal?.write(`\x1b[31m${full}\x1b[0m\r\n`);
+	}
 }
 
-// ─── Keybind helpers ──────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-// Ghostty's built-in defaults that we always enforce.
-const GHOSTTY_BUILTIN_KEYBINDS: GhosttyKeybind[] = [
-    { mods: new Set(['super']), key: 'c',     action: 'copy_to_clipboard' },
-    { mods: new Set(['super']), key: 'v',     action: 'paste_from_clipboard' },
-    // shift+enter / cmd+enter → kitty keyboard protocol newlines (used by Claude etc.)
-    { mods: new Set(['shift']), key: 'enter', action: 'text:\x1b[13;2u' },
-    { mods: new Set(['super']), key: 'enter', action: 'text:\x1b[13;9u' },
-];
-
-/**
- * Merge built-in defaults with user config keybinds.
- * User entries win when they share the same key combo.
- */
-function buildEffectiveKeybinds(userKeybinds: GhosttyKeybind[]): GhosttyKeybind[] {
-    const result: GhosttyKeybind[] = [...GHOSTTY_BUILTIN_KEYBINDS];
-    for (const kb of userKeybinds) {
-        const idx = result.findIndex(r => r.key === kb.key && setsEqual(r.mods, kb.mods));
-        if (idx !== -1) result[idx] = kb;
-        else result.push(kb);
-    }
-    return result;
+function sanitize(s: string): string {
+	return s.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64) || "default";
 }
 
-function setsEqual(a: Set<string>, b: Set<string>): boolean {
-    if (a.size !== b.size) return false;
-    for (const v of a) if (!b.has(v)) return false;
-    return true;
-}
-
-/** Map DOM KeyboardEvent → Ghostty key name */
-function domKeyToGhostty(domKey: string): string {
-    const map: Record<string, string> = {
-        'Enter':      'enter',
-        'Tab':        'tab',
-        'Backspace':  'backspace',
-        'Escape':     'escape',
-        'Delete':     'delete',
-        'Insert':     'insert',
-        'Home':       'home',
-        'End':        'end',
-        'PageUp':     'page_up',
-        'PageDown':   'page_down',
-        'ArrowUp':    'up',
-        'ArrowDown':  'down',
-        'ArrowLeft':  'left',
-        'ArrowRight': 'right',
-        ' ':          'space',
-    };
-    if (map[domKey]) return map[domKey];
-    if (/^F\d+$/.test(domKey)) return domKey.toLowerCase();  // F1–F12
-    if (domKey.length === 1) return domKey.toLowerCase();
-    return domKey.toLowerCase();
-}
-
-function findKeybind(e: KeyboardEvent, keybinds: GhosttyKeybind[]): GhosttyKeybind | undefined {
-    const eventMods = new Set<string>();
-    if (e.metaKey)  eventMods.add('super');
-    if (e.ctrlKey)  eventMods.add('ctrl');
-    if (e.shiftKey) eventMods.add('shift');
-    if (e.altKey)   eventMods.add('alt');
-
-    const ghosttyKey = domKeyToGhostty(e.key);
-    return keybinds.find(kb => kb.key === ghosttyKey && setsEqual(kb.mods, eventMods));
-}
-
-/** Unescape Ghostty text: action escape sequences like \e, \n, \r, \t */
-function unescapeGhosttyText(s: string): string {
-    return s
-        .replace(/\\e/g, '\x1b')
-        .replace(/\\n/g, '\n')
-        .replace(/\\r/g, '\r')
-        .replace(/\\t/g, '\t')
-        .replace(/\\\\/g, '\\');
+/** Find Bun across PATH plus the common install locations Obsidian misses. */
+function resolveBun(env: Record<string, string>): string | null {
+	const candidates: string[] = [];
+	for (const dir of (env.PATH ?? "").split(path.delimiter)) {
+		if (dir) candidates.push(path.join(dir, "bun"));
+	}
+	const home = env.HOME || os.homedir();
+	candidates.push(
+		path.join(home, ".bun/bin/bun"),
+		"/opt/homebrew/bin/bun",
+		"/usr/local/bin/bun",
+	);
+	for (const cand of candidates) {
+		try {
+			if (fs.existsSync(cand)) return cand;
+		} catch {
+			/* keep looking */
+		}
+	}
+	return null;
 }

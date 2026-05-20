@@ -1,11 +1,11 @@
 {
-    "id": "ghostty-terminal",
-    "name": "Ghostty Terminal",
-    "version": "0.2.1",
-    "minAppVersion": "1.7.2",
-    "description": "True Ghostty embedded terminal (libghostty-vt WASM) – with your real Ghostty config, multi-split support, and file-explorer context menu.",
-    "author": "Mayank Lavania",
-    "authorUrl": "https://github.com/lavs9",
-    "isDesktopOnly": true,
-    "fundingUrl": ""
+	"id": "obsidian-terminal-agents",
+	"name": "Terminal for Agents",
+	"version": "0.1.0",
+	"minAppVersion": "1.7.2",
+	"description": "Embedded Ghostty terminal pane with live vault context for agents (Claude Code, etc.).",
+	"author": "smcllns",
+	"authorUrl": "https://github.com/smcllns",
+	"isDesktopOnly": true,
+	"fundingUrl": ""
 }
