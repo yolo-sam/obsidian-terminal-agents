@@ -2239,7 +2239,7 @@ For tests, pass a Ghostty instance directly:
 
 // main.ts
 var import_node_child_process = require("node:child_process");
-var fs2 = __toESM(require("node:fs"));
+var fs3 = __toESM(require("node:fs"));
 var os2 = __toESM(require("node:os"));
 var path2 = __toESM(require("node:path"));
 
@@ -2326,6 +2326,7 @@ function leafToTabInfo(leaf, activeLeaf) {
 
 // settings.ts
 var import_obsidian = require("obsidian");
+var fs2 = __toESM(require("node:fs"));
 var DEFAULT_SETTINGS = {
   defaultShell: "",
   fontSize: 13,
@@ -2333,6 +2334,13 @@ var DEFAULT_SETTINGS = {
   customScopePath: "",
   shareObsidianContext: true
 };
+function isExistingDir(p) {
+  try {
+    return fs2.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 class TerminalAgentsSettingTab extends import_obsidian.PluginSettingTab {
   plugin;
@@ -2360,8 +2368,13 @@ class TerminalAgentsSettingTab extends import_obsidian.PluginSettingTab {
       this.display();
     }));
     if (this.plugin.settings.agentScope === "custom") {
-      new import_obsidian.Setting(containerEl).setName("Custom scope path").setDesc("Absolute path. Used when Agent scope is Custom.").addText((text) => text.setValue(this.plugin.settings.customScopePath).onChange(async (value) => {
-        this.plugin.settings.customScopePath = value.trim();
+      new import_obsidian.Setting(containerEl).setName("Custom scope path").setDesc("Absolute path. Used when Agent scope is Custom. Must be an existing directory.").addText((text) => text.setValue(this.plugin.settings.customScopePath).onChange(async (value) => {
+        const trimmed = value.trim();
+        if (trimmed && !isExistingDir(trimmed)) {
+          new import_obsidian.Notice(`"${trimmed}" is not an existing directory — value not saved.`, 5000);
+          return;
+        }
+        this.plugin.settings.customScopePath = trimmed;
         await this.plugin.saveSettings();
       }));
     }
@@ -2508,7 +2521,7 @@ class TerminalView extends import_obsidian2.ItemView {
     const env = this.buildEnv(cwd);
     const { argv, extraEnv } = this.buildShellInvocation(env);
     const helperPath = this.helperPath();
-    if (!fs2.existsSync(helperPath)) {
+    if (!fs3.existsSync(helperPath)) {
       this.fail(`helper.ts not found at ${helperPath}`, null);
       return;
     }
@@ -2534,6 +2547,11 @@ class TerminalView extends import_obsidian2.ItemView {
       return;
     }
     const stdio = this.helper.stdio;
+    if (!stdio[3]) {
+      this.fail("Helper stdio[3] (resize pipe) missing — child process spawned with wrong stdio config", null);
+      this.killHelper();
+      return;
+    }
     this.resizePipe = stdio[3];
     this.helper.stdout?.on("data", (buf) => {
       this.terminal?.write(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
@@ -2585,7 +2603,9 @@ class TerminalView extends import_obsidian2.ItemView {
     const vaultRoot = adapter.getBasePath?.() ?? os2.homedir();
     const settings = this.plugin.settings;
     if (settings.agentScope === "custom" && settings.customScopePath) {
-      return settings.customScopePath;
+      if (isUsableDir(settings.customScopePath))
+        return settings.customScopePath;
+      new import_obsidian2.Notice(`Custom scope path "${settings.customScopePath}" is unreachable — falling back to vault root.`, 6000);
     }
     if (settings.agentScope === "activeNoteFolder") {
       const file = this.app.workspace.getActiveFile();
@@ -2599,14 +2619,14 @@ class TerminalView extends import_obsidian2.ItemView {
     const vaultRoot = adapter.getBasePath?.() ?? os2.homedir();
     const vaultName = this.app.vault.getName();
     const contextFile = path2.join(os2.tmpdir(), "obs-terminal-agents", sanitize(vaultName), "context.json");
-    fs2.mkdirSync(path2.dirname(contextFile), { recursive: true });
+    fs3.mkdirSync(path2.dirname(contextFile), { recursive: true });
     return {
       ...process.env,
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       TERM_PROGRAM: "obsidian-terminal-agents",
       OBSIDIAN_VAULT: vaultRoot,
-      OBSIDIAN_VAULT_NAME: vaultName,
+      OBSIDIAN_VAULT_NAME: sanitizeForPrompt(vaultName),
       OBSIDIAN_CONTEXT_FILE: contextFile,
       OBSIDIAN_CWD: cwd
     };
@@ -2618,20 +2638,23 @@ class TerminalView extends import_obsidian2.ItemView {
       return { argv: [shell, "-i"], extraEnv: {} };
     }
     const stageDir = path2.join(os2.tmpdir(), "obs-terminal-agents", sanitize(env.OBSIDIAN_VAULT_NAME ?? "default"), "rc");
-    fs2.mkdirSync(stageDir, { recursive: true });
+    fs3.mkdirSync(stageDir, { recursive: true });
     const rcSrc = this.readShellrc();
     const rcPath = path2.join(stageDir, "shellrc.sh");
-    fs2.writeFileSync(rcPath, rcSrc);
+    fs3.writeFileSync(rcPath, rcSrc);
     if (shellName === "bash") {
       const stub = path2.join(stageDir, "bashrc-stub");
-      fs2.writeFileSync(stub, `[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+      fs3.writeFileSync(stub, `[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 . "${rcPath}"
 `);
       return { argv: [shell, "--rcfile", stub, "-i"], extraEnv: {} };
     }
     if (shellName === "zsh") {
+      const zenv = path2.join(stageDir, ".zshenv");
+      fs3.writeFileSync(zenv, `[ -f "$HOME/.zshenv" ] && . "$HOME/.zshenv"
+`);
       const zrc = path2.join(stageDir, ".zshrc");
-      fs2.writeFileSync(zrc, `[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"
+      fs3.writeFileSync(zrc, `[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"
 . "${rcPath}"
 `);
       return { argv: [shell, "-i"], extraEnv: { ZDOTDIR: stageDir } };
@@ -2644,7 +2667,7 @@ class TerminalView extends import_obsidian2.ItemView {
   readShellrc() {
     const p = this.pluginFile("shellrc.sh");
     try {
-      return fs2.readFileSync(p, "utf8");
+      return fs3.readFileSync(p, "utf8");
     } catch {
       return "";
     }
@@ -2669,6 +2692,16 @@ class TerminalView extends import_obsidian2.ItemView {
 function sanitize(s) {
   return s.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64) || "default";
 }
+function sanitizeForPrompt(s) {
+  return s.replace(/[\x00-\x1f"'\\`]/g, "").slice(0, 200) || "vault";
+}
+function isUsableDir(p) {
+  try {
+    return fs3.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
 function resolveBun(env) {
   const candidates = [];
   for (const dir of (env.PATH ?? "").split(path2.delimiter)) {
@@ -2679,7 +2712,7 @@ function resolveBun(env) {
   candidates.push(path2.join(home, ".bun/bin/bun"), "/opt/homebrew/bin/bun", "/usr/local/bin/bun");
   for (const cand of candidates) {
     try {
-      if (fs2.existsSync(cand))
+      if (fs3.existsSync(cand))
         return cand;
     } catch {}
   }

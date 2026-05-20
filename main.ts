@@ -220,7 +220,18 @@ class TerminalView extends ItemView {
 			return;
 		}
 
-		const stdio = this.helper.stdio as unknown as NodeJS.WritableStream[];
+		// stdio matches the spawn arg above: [stdin, stdout, stderr, fd3-resize]
+		const stdio = this.helper.stdio as unknown as [
+			NodeJS.WritableStream,
+			NodeJS.ReadableStream,
+			NodeJS.WritableStream,
+			NodeJS.WritableStream,
+		];
+		if (!stdio[3]) {
+			this.fail("Helper stdio[3] (resize pipe) missing — child process spawned with wrong stdio config", null);
+			this.killHelper();
+			return;
+		}
 		this.resizePipe = stdio[3];
 
 		this.helper.stdout?.on("data", (buf: Buffer) => {
@@ -285,7 +296,13 @@ class TerminalView extends ItemView {
 		const vaultRoot = adapter.getBasePath?.() ?? os.homedir();
 		const settings = this.plugin.settings;
 		if (settings.agentScope === "custom" && settings.customScopePath) {
-			return settings.customScopePath;
+			// Fall back to vault root if the custom path is unreachable so the
+			// terminal opens somewhere usable instead of failing the spawn.
+			if (isUsableDir(settings.customScopePath)) return settings.customScopePath;
+			new Notice(
+				`Custom scope path "${settings.customScopePath}" is unreachable — falling back to vault root.`,
+				6000,
+			);
 		}
 		if (settings.agentScope === "activeNoteFolder") {
 			const file = this.app.workspace.getActiveFile();
@@ -312,7 +329,10 @@ class TerminalView extends ItemView {
 			COLORTERM: "truecolor",
 			TERM_PROGRAM: "obsidian-terminal-agents",
 			OBSIDIAN_VAULT: vaultRoot,
-			OBSIDIAN_VAULT_NAME: vaultName,
+			// Strip control chars and surrounding quotes/backslashes from the vault
+			// name — it lands in the agent's system prompt as text, and we don't
+			// want a clever vault name to break out of that string.
+			OBSIDIAN_VAULT_NAME: sanitizeForPrompt(vaultName),
 			OBSIDIAN_CONTEXT_FILE: contextFile,
 			OBSIDIAN_CWD: cwd,
 		};
@@ -355,6 +375,11 @@ class TerminalView extends ItemView {
 			return { argv: [shell, "--rcfile", stub, "-i"], extraEnv: {} };
 		}
 		if (shellName === "zsh") {
+			// zsh reads .zshenv → .zshrc from ZDOTDIR when set. We need to defer to
+			// the user's real $HOME files for both, otherwise PATH/EDITOR/etc set in
+			// their .zshenv gets dropped.
+			const zenv = path.join(stageDir, ".zshenv");
+			fs.writeFileSync(zenv, `[ -f "$HOME/.zshenv" ] && . "$HOME/.zshenv"\n`);
 			const zrc = path.join(stageDir, ".zshrc");
 			fs.writeFileSync(zrc, `[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"\n. "${rcPath}"\n`);
 			return { argv: [shell, "-i"], extraEnv: { ZDOTDIR: stageDir } };
@@ -400,6 +425,20 @@ class TerminalView extends ItemView {
 
 function sanitize(s: string): string {
 	return s.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 64) || "default";
+}
+
+/** Make a string safe to embed as a literal in a system-prompt sentence. */
+function sanitizeForPrompt(s: string): string {
+	// Drop control chars, ASCII quotes, and backslashes. Keep CJK/emoji/spaces.
+	return s.replace(/[\x00-\x1f"'\\`]/g, "").slice(0, 200) || "vault";
+}
+
+function isUsableDir(p: string): boolean {
+	try {
+		return fs.statSync(p).isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 /** Find Bun across PATH plus the common install locations Obsidian misses. */

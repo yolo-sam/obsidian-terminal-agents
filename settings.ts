@@ -1,4 +1,5 @@
-import { type App, PluginSettingTab, Setting } from "obsidian";
+import { type App, Notice, PluginSettingTab, Setting } from "obsidian";
+import * as fs from "node:fs";
 import type TerminalAgentsPlugin from "./main";
 
 export type AgentScope =
@@ -21,6 +22,14 @@ export const DEFAULT_SETTINGS: TerminalAgentsSettings = {
 	customScopePath: "",
 	shareObsidianContext: true,
 };
+
+function isExistingDir(p: string): boolean {
+	try {
+		return fs.statSync(p).isDirectory();
+	} catch {
+		return false;
+	}
+}
 
 export class TerminalAgentsSettingTab extends PluginSettingTab {
 	constructor(
@@ -81,12 +90,17 @@ export class TerminalAgentsSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.agentScope === "custom") {
 			new Setting(containerEl)
 				.setName("Custom scope path")
-				.setDesc("Absolute path. Used when Agent scope is Custom.")
+				.setDesc("Absolute path. Used when Agent scope is Custom. Must be an existing directory.")
 				.addText((text) =>
 					text
 						.setValue(this.plugin.settings.customScopePath)
 						.onChange(async (value) => {
-							this.plugin.settings.customScopePath = value.trim();
+							const trimmed = value.trim();
+							if (trimmed && !isExistingDir(trimmed)) {
+								new Notice(`"${trimmed}" is not an existing directory — value not saved.`, 5000);
+								return;
+							}
+							this.plugin.settings.customScopePath = trimmed;
 							await this.plugin.saveSettings();
 						}),
 				);
