@@ -24,7 +24,11 @@
 	position: relative;
 	width: 100%;
 	height: 100%;
-	padding: 8px 12px;
+	/* Tiny top/bottom padding only. Horizontal padding doubles the empty gap on
+	 * the right edge because ghostty-web's FitAddon already reserves ~14px there
+	 * for its scrollbar. Left padding has no equivalent reservation, so leaving
+	 * it at 0 keeps text flush with the pane edge. */
+	padding: 6px 0 0 0;
 	box-sizing: border-box;
 	overflow: hidden;
 }

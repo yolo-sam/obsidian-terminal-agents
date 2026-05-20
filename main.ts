@@ -312,11 +312,20 @@ class TerminalView extends ItemView {
 		);
 		fs.mkdirSync(path.dirname(contextFile), { recursive: true });
 
+		// Obsidian launches with a minimal env that lacks LANG/LC_ALL. Without a
+		// UTF-8 locale, zsh and most CLIs emit raw bytes that ghostty-web shows as
+		// `<NNNN>` codepoint boxes (em-dashes, accented chars, etc. all break).
+		// Terminal.app injects en_US.UTF-8 automatically; do the same here.
+		const inheritedLang = process.env.LANG ?? "";
+		const lang = /\.UTF-?8$/i.test(inheritedLang) ? inheritedLang : "en_US.UTF-8";
+
 		return {
 			...(process.env as Record<string, string>),
 			TERM: "xterm-256color",
 			COLORTERM: "truecolor",
 			TERM_PROGRAM: "obsidian-terminal-agents",
+			LANG: lang,
+			LC_ALL: lang,
 			OBSIDIAN_VAULT: vaultRoot,
 			// Strip control chars and surrounding quotes/backslashes from the vault
 			// name — it lands in the agent's system prompt as text, and we don't

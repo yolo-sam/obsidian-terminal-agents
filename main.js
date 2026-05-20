@@ -2656,11 +2656,15 @@ class TerminalView extends import_obsidian2.ItemView {
     const vaultName = this.app.vault.getName();
     const contextFile = path2.join(os2.tmpdir(), "obs-terminal-agents", sanitize(vaultName), "context.json");
     fs3.mkdirSync(path2.dirname(contextFile), { recursive: true });
+    const inheritedLang = process.env.LANG ?? "";
+    const lang = /\.UTF-?8$/i.test(inheritedLang) ? inheritedLang : "en_US.UTF-8";
     return {
       ...process.env,
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       TERM_PROGRAM: "obsidian-terminal-agents",
+      LANG: lang,
+      LC_ALL: lang,
       OBSIDIAN_VAULT: vaultRoot,
       OBSIDIAN_VAULT_NAME: sanitizeForPrompt(vaultName),
       OBSIDIAN_CONTEXT_FILE: contextFile,
